@@ -8,44 +8,39 @@ namespace GZipTest2
     {
         private readonly List<Exception> _exceptions = new List<Exception>();
         private readonly Thread[] _threads;
-        private int _cancelRequest;
         private int _outOfMemoryException;
 
-        public ThreadManager(int threads, Action<Action> action)
+        public ThreadManager(int threads, Action<int> action)
         {
             if (action == null) throw new ArgumentNullException("action");
             if (threads < 1) throw new ArgumentException("threads");
             _threads = new Thread[threads];
             for (int n = 0; n < threads; ++n)
             {
-                var i = n;
+                int n1 = n;
                 _threads[n] = new Thread(() =>
-                {
-                    try
-                    {
-                        action(() =>
-                        {
-                            if (_cancelRequest != 0)
-                                throw new OperationCanceledException();
-                        });
-                    }
-                    catch (Exception ex)
                     {
                         try
                         {
-                            lock (_exceptions)
-                                _exceptions.Add(ex);
+                            action(n1);
                         }
-                        catch
+                        catch (Exception ex)
                         {
-                            Interlocked.Exchange(ref _outOfMemoryException, 1);
+                            try
+                            {
+                                lock (_exceptions)
+                                    _exceptions.Add(ex);
+                            }
+                            catch
+                            {
+                                Interlocked.Exchange(ref _outOfMemoryException, 1);
+                            }
                         }
-                    }
-                })
-                {
-                    Name = string.Format("Thread #{0}", n),
-                    IsBackground = true
-                };
+                    })
+                    {
+                        Name = string.Format("Thread #{0}", n),
+                        IsBackground = true
+                    };
             }
         }
 
@@ -53,11 +48,6 @@ namespace GZipTest2
         {
             foreach (Thread thread in _threads)
                 thread.Start();
-        }
-
-        public void CancelRequest()
-        {
-            Interlocked.Exchange(ref _cancelRequest, 1);
         }
 
         public void WaitForAll()
@@ -69,7 +59,6 @@ namespace GZipTest2
 
         public bool WaitForAll(TimeSpan timeout)
         {
-
             DateTime endTime = DateTime.UtcNow + timeout;
             foreach (Thread thread in _threads)
             {

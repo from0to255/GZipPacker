@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Threading;
 
 namespace GZipTest2
@@ -27,20 +26,17 @@ namespace GZipTest2
             _queue = new DataAndState[workingThreads];
             for (int n = _queue.Length; n-- > 0;)
                 _queue[n] = new DataAndState();
-            var actions = new Queue<Action<Action>>();
-            _threadManager = new ThreadManager(_queue.Length, checkCanceled =>
+            _threadManager = new ThreadManager(_queue.Length, (n) =>
                 {
-                    while (true)
-                    {
-                        checkCanceled();
-                        Action<Action> action;
-                        lock (actions)
-                            action = actions.Count != 0 ? actions.Dequeue() : null;
-                        if (action != null)
-                            action(checkCanceled);
+                    DataAndState dataState = _queue[n];
+                    while (_cancelRequest == 0)
+                        if ((State) Interlocked.CompareExchange(ref dataState.State, (int) State.Compressing, (int) State.Read) == State.Read)
+                        {
+                            dataState.DstDataSize = processor(dataState.SrcData, dataState.SrcDataSize, dataState.DstData);
+                            Interlocked.Exchange(ref dataState.State, (int) State.Compressed);
+                        }
                         else
                             Thread.Sleep(10);
-                    }
                 });
             _inThread = new Thread(() =>
                 {
@@ -49,7 +45,7 @@ namespace GZipTest2
                         while (_cancelRequest == 0)
                         {
                             DataAndState dataState = _queue[_inIndex];
-                            if ((State) Interlocked.CompareExchange(ref dataState.State, (int) State.ReadingAndCompressing, (int) State.Free) == State.Free)
+                            if ((State) Interlocked.CompareExchange(ref dataState.State, (int) State.Reading, (int) State.Free) == State.Free)
                             {
                                 _inIndex = (_inIndex + 1)%_queue.Length;
                                 if ((dataState.SrcDataSize = reader(dataState.SrcData)) == 0)
@@ -57,12 +53,7 @@ namespace GZipTest2
                                     Interlocked.Exchange(ref dataState.State, (int) State.Finished);
                                     break;
                                 }
-                                lock (actions)
-                                    actions.Enqueue(checkCanceled =>
-                                        {
-                                            dataState.DstDataSize = processor(dataState.SrcData, dataState.SrcDataSize, dataState.DstData);
-                                            Interlocked.Exchange(ref dataState.State, (int) State.Compressed);
-                                        });
+                                Interlocked.Exchange(ref dataState.State, (int) State.Read);
                             }
                             else
                                 Thread.Sleep(10);
@@ -125,7 +116,6 @@ namespace GZipTest2
         public void CancelRequest()
         {
             Interlocked.Exchange(ref _cancelRequest, 1);
-            _threadManager.CancelRequest();
         }
 
         private void ThrowExceptionIfNeed()
@@ -143,6 +133,8 @@ namespace GZipTest2
         {
             _inThread.Join();
             _outThread.Join();
+            Interlocked.Exchange(ref _cancelRequest, 1);
+            _threadManager.WaitForAll();
             ThrowExceptionIfNeed();
         }
 
@@ -150,38 +142,18 @@ namespace GZipTest2
         {
             if (!_inThread.Join(timeout) || !_outThread.Join(timeout))
                 return false;
+            Interlocked.Exchange(ref _cancelRequest, 1);
+            if (!_threadManager.WaitForAll(TimeSpan.FromMilliseconds(timeout)))
+                return false;
             ThrowExceptionIfNeed();
             return true;
-        }
-
-        public sealed class Buffer
-        {
-            public Buffer(int initialCapacity)
-            {
-                _data = new byte[initialCapacity];
-            }
-
-            public byte[] Data { get { return _data; } }
-
-            public int Capacity
-            {
-                get { return _data.Length; }
-                set
-                {
-                    if (_data.Length < value)
-                        _data = new byte[value];
-                }
-            }
-
-
-            private byte[] _data;
         }
 
         private class DataAndState
         {
             public readonly Buffer DstData;
-            public int DstDataSize;
             public readonly Buffer SrcData;
+            public int DstDataSize;
             public int SrcDataSize;
             public int State;
 
@@ -195,7 +167,9 @@ namespace GZipTest2
         private enum State
         {
             Free,
-            ReadingAndCompressing,
+            Reading,
+            Read,
+            Compressing,
             Compressed,
             Writting,
             Finished
